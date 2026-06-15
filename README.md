@@ -4,96 +4,53 @@ TerraSense is a production-ready, full-stack web application designed to help us
 
 ---
 
-## Core Features
+## 1. Problem Statement
+Climate change is the defining crisis of our time, and individual choices collectively account for over 70% of global greenhouse gas emissions. However, most individuals lack the tools to measure, visualize, and systematically reduce their personal impact. Existing carbon calculators are often overly complex, static, and fail to provide actionable, localized advice or interactive community challenges. 
 
-1. **User Authentication & Profiles**: Register and login securely using password hashing via `bcryptjs` and token session management via JWT. Set personalized carbon reduction targets (5%-95%) and interest tags.
-2. **Carbon Footprint Calculator**: Multi-step wizard logging parameters across:
-   - *Transportation*: Car, bus, train, flights, and active bicycling/walking.
-   - *Utilities*: Electricity, natural gas, heating oil, and water consumption.
-   - *Diet & Meals*: Weekly logging of vegetarian, non-vegetarian, and vegan meals.
-   - *Lifestyle & Waste*: Monthly clothing/electronics purchases, shipping packages, and waste generation.
-3. **Smart Analytics Dashboard**:
-   - Total monthly carbon footprint tally.
-   - Daily/weekly/monthly line trend visualization.
-   - Category-wise pie/donut breakdown of emissions.
-   - 0-100 Carbon Rating Score.
-   - Continuous month-over-month calculation **logging streaks**.
-4. **Historical Footprint Prediction**: Predicts next month's carbon footprint using linear historical trajectory projections to warn or encourage users.
-5. **National Average Comparisons**: Contextual comparison charts matching user outputs against national average footprints (US, UK, India, global average).
-6. **Eco Challenges Portal**: Claims weekly points (+150-200 pts) for completing active sustainability goals (No-Plastic Challenge, Public Transport Day, Energy-Saving Day, 10% Reduction Challenge).
-7. **AI Sustainability Advisor**: Generates custom reduction strategies targeted at the user's highest emission segment.
-8. **Printable AI Reports & Certificates**:
-   - *AI Sustainability Report*: Narrative summarizing carbon diagnostics, highest categories, and specific tips. Printable/saveable as a PDF.
-   - *Ambassador Certificate*: Printable, verified achievement credential unlocked when a user earns 500 points or achieves a 50% carbon reduction.
+**TerraSense** bridges this gap by providing an intuitive, interactive carbon accounting portal with real-time feedback, predictive forecasting, gamified challenges, and printable AI sustainability audits.
 
 ---
 
-## Technical Stack
+## 2. Screenshots
 
-### Frontend
-- **React.js** (initialized using Vite)
-- **Tailwind CSS / Custom CSS**: Implements a clean, mobile-responsive layout with modern glassmorphism panels, transitions, and native dark/light theme support.
-- **Lucide React** for modern iconography.
-- **Custom SVG Charts**: Custom line charts and donut slices for high performance, zero external rendering dependencies, and dark/light adaptive styling.
+Here are mockup screenshots of the TerraSense user interface:
 
-### Backend
-- **Node.js + Express.js** (REST API)
-- **SQLite**: Zero-configuration relational database stored locally in `database.sqlite`.
-- **JWT (JSON Web Tokens)**: Secure token authorization headers.
-- **Bcryptjs** for user password hashing.
+### Analytics Dashboard
+![Dashboard Mockup](Screenshots/dashboard.png)
+
+### Carbon Footprint Calculator Wizard
+![Calculator Mockup](Screenshots/calculator.png)
 
 ---
 
-## Enterprise Folder Architecture
+## 3. Features
 
-```text
-CarbonZero/
-├── .gitignore
-├── README.md                      # Platform overview (TerraSense)
-├── backend/
-│   ├── index.js                  # Express API entry-point
-│   ├── middleware/
-│   │   └── auth.js               # JWT authentication filter
-│   ├── models/
-│   │   └── database.js           # SQLite seeder and schema builder
-│   ├── routes/
-│   │   ├── auth.js               # Registration and profile endpoints
-│   │   ├── calculations.js       # Carbon logs, summary, predictions, and averages
-│   │   ├── leaderboard.js        # Rankings, badges, and challenge claims
-│   │   └── educational.js        # Articles fetch and read markers
-│   ├── tests/
-│   │   ├── calculator.test.js    # Unit tests for coefficients
-│   │   └── api.test.js           # Integration tests for route endpoints
-│   ├── utils/
-│   │   └── calculator.js         # Isolated calculator logic
-│   ├── .env.example
-│   ├── package.json
-│   └── README.md
-└── frontend/
-    ├── src/
-    │   ├── components/
-    │   │   └── Charts.jsx        # Custom SVG charts
-    │   ├── pages/
-    │   │   ├── Auth.jsx          # Login/Register view
-    │   │   ├── Calculator.jsx    # Wizard calculator form
-    │   │   ├── Dashboard.jsx     # Analytics, PDF reports, and Certificates
-    │   │   ├── Recommendations.jsx# AI Advisor tips
-    │   │   ├── Leaderboard.jsx   # Weekly Challenges & community standings
-    │   │   ├── EducationalHub.jsx# Articles and collective simulator
-    │   │   └── Profile.jsx       # Personal targets settings
-    │   ├── services/
-    │   │   └── api.js            # Client API fetcher
-    │   ├── styles/
-    │   │   └── index.css         # Styling system
-    │   ├── App.jsx               # App routing and theme controller
-    │   └── main.jsx
-    ├── package.json
-    └── README.md
-```
+- **Accurate Footprint calculations**: Multi-step wizard logging parameters across:
+  - *Transportation*: Car, bus, train, flight, bike.
+  - *Utilities*: Electricity, gas, heating oil, water consumption.
+  - *Food*: Vegetarian, non-vegetarian, vegan meals.
+  - *Lifestyle & Waste*: Clothing, electronics, shipping packages, waste kg.
+- **Real-Time CO2 Preview**: An active preview bar that calculates emission totals instantly as sliders and number inputs are adjusted.
+- **Footprint Forecasting**: Employs linear regression history projections to forecast next month's carbon footprint.
+- **National Average Comparisons**: Benchmarks user emissions against averages for the US, UK, India, and global per capita averages.
+- **Eco Challenges Portal**: Claims weekly points (+150-200 pts) for completing active sustainability goals (No-Plastic, Public Transit, Energy-Saving, 10% Reduction).
+- **Gamified Achievements**: Renders level systems, community leaderboards, logging streaks, and milestone badges (First Step, Green Guardian, Sustainability Champion, Eco Scholar, Habit Changer).
+- **AI-Generated Sustainability Reports & Certificates**: Generates custom narrative sustainability reports and printable credentials. Handles print stylesheets wrapper for PDF printing via `window.print()`.
+- **Accessibility (A11y)**: WCAG 2.1 AA compliant, supporting screen reader aria-labels, high contrast HSL themes (Light/Dark mode), and keyboard focus outline navigation.
+- **Dark & Light Mode Toggle**: Sleek interface supporting both settings, persistent via local storage.
 
 ---
 
-## Setup & Local Running
+## 4. Tech Stack
+
+- **Frontend**: React.js (Vite), Tailwind CSS/Custom HSL themes, Lucide React Icons, Custom SVG Charts (no canvas/external layout engine dependencies).
+- **Backend**: Node.js + Express.js
+- **Database**: SQLite (using `sqlite3` driver)
+- **Session Auth**: JWT (JSON Web Tokens) + Bcryptjs password hashing
+
+---
+
+## 5. Setup Instructions
 
 ### Prerequisites
 - Node.js (v18.0.0 or higher)
@@ -101,7 +58,7 @@ CarbonZero/
 
 ### 1. Run the Backend
 ```bash
-cd backend
+cd Backend
 npm install
 npm run dev
 ```
@@ -110,21 +67,52 @@ npm run dev
 ### 2. Run the Frontend
 Open a new terminal window:
 ```bash
-cd frontend
+cd Frontend
 npm install
 npm run dev
 ```
 *The Vite React client will run on `http://localhost:5173`.*
 
----
-
-## Testing
-
-To run the unit and integration tests:
+### Running Tests
+To run unit and integration tests:
 ```bash
-cd backend
+cd Backend
 npm test
 ```
-**Tests Executed**:
-- Calculator Unit Tests: Zero defaults, transport/train arithmetic, utility factors, scaled meals, waste factors, water factors, and combined inputs.
-- API Route Integration Tests: User registration, login headers, profile retrieval, calculation submission, prediction outputs, and weekly challenge claim checks.
+
+---
+
+## 6. API Endpoints
+
+All API routes require a `Bearer <token>` in the `Authorization` header, except for public registration/login endpoints.
+
+### Authentication
+- `POST /api/auth/register` - Registers a new user. Returns JWT token and profile details.
+- `POST /api/auth/login` - Validates credentials. Returns JWT token.
+- `GET /api/auth/me` - Returns logged-in user profile, points, and reduction target.
+- `PUT /api/auth/profile` - Updates profile parameters (name, location, target, interests).
+
+### Calculator & Analytics
+- `POST /api/calculations` - Log monthly parameters. Saves to database and returns CO2 metrics.
+- `GET /api/calculations/history` - Fetches all calculations sorted by date descending.
+- `GET /api/calculations/summary` - Computes baseline comparisons, emission scores, predictions, and national averages.
+
+### AI Recommendations
+- `GET /api/recommendations` - Computes highest-impact categories and yields custom tips.
+- `POST /api/recommendations/adopt` - Set recommendation status (`none` | `in_progress` | `adopted`). Awards +100 points on adoption completion.
+
+### Gamification & Leaderboard
+- `GET /api/leaderboard` - Standings sorted by CO2 reduction percentage relative to baseline.
+- `GET /api/leaderboard/badges` - Fetches earned and locked badges status.
+- `POST /api/leaderboard/claim-challenge` - Claim +150-200 points for satisfying active challenges.
+
+### Educational Hub
+- `GET /api/educational` - Fetches sustainability articles and read markers.
+- `POST /api/educational/read` - Logs article completion. Awards +25 points.
+
+---
+
+## 7. Future Scope
+- **IoT Smart Meter Integration**: Connect utility electricity metrics directly to smart home thermostats for real-time tracking.
+- **Verified Offsets Integration**: Link users with verified carbon offset projects (like reforestation or wind farms) to offset their footprint directly within the app.
+- **Travel Route Optimization**: Connect calculator transport inputs with mapping APIs to calculate exact emissions based on driving routes vs. train lines.

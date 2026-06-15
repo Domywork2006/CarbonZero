@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { calculateCarbonFootprint } = require('../utils/calculator');
+const { calculateCarbonFootprint } = require('../../Backend/utils/calculator');
 
 test('TerraSense Carbon Calculator Unit Tests', async (t) => {
   

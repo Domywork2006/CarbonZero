@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
-const app = require('../index');
+const app = require('../../Backend/index');
 
 test('TerraSense API Integration Tests', async (t) => {
   let server;
