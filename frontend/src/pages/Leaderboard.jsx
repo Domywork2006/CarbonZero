@@ -54,7 +54,7 @@ export default function Leaderboard({ user, onPointsChange, showToast }) {
       }
     }
 
-    fetch('http://localhost:5000/api/leaderboard/claim-challenge', {
+    fetch(`${import.meta.env.VITE_API_URL}/api/leaderboard/claim-challenge`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
