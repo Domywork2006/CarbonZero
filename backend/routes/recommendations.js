@@ -1,9 +1,25 @@
+'use strict';
+
+/**
+ * @fileoverview AI recommendations routes for TerraSense.
+ * Surfaces personalised reduction tips based on the user's highest emission categories.
+ * Handles tip adoption and points rewards.
+ *
+ * Refactored: nested callbacks → async/await, magic numbers → constants.
+ */
+
 const express = require('express');
 const router = express.Router();
-const db = require('../models/database');
 const auth = require('../middleware/auth');
+const { asyncHandler, AppError } = require('../middleware/errorHandler');
+const { dbGet, dbRun, dbAll } = require('../utils/db');
+const { POINTS_REWARDS, RECOMMENDATION_TIPS_COUNT } = require('../utils/constants');
 
-// Master tips database
+// ---------------------------------------------------------------------------
+// Tips Database
+// ---------------------------------------------------------------------------
+
+/** @type {Array<{id: string, title: string, category: string, savings: number, difficulty: string, timeline: string, description: string}>} */
 const ALL_TIPS = [
   // Transport Tips
   {
@@ -160,7 +176,7 @@ const ALL_TIPS = [
     savings: 60,
     difficulty: 'Medium',
     timeline: '1 month',
-    description: 'Avoid manufacturing emissions—which make up 80% of a smart device’s lifecycle footprint—by replacing batteries or screens.'
+    description: 'Avoid manufacturing emissions—which make up 80% of a smart device\'s lifecycle footprint—by replacing batteries or screens.'
   },
   {
     id: 'purch_consolidate',
@@ -182,139 +198,138 @@ const ALL_TIPS = [
   }
 ];
 
-// @route   GET api/recommendations
-// @desc    Get user-specific carbon reduction tips based on highest categories
-// @access  Private
-router.get('/', auth, (req, res) => {
-  // 1. Get latest calculation
-  db.get('SELECT * FROM calculations WHERE user_id = ? ORDER BY date DESC LIMIT 1', [req.user.id], (err, calc) => {
-    if (err) {
-      return res.status(500).json({ error: 'Database query failed' });
-    }
+// ---------------------------------------------------------------------------
+// Private Helpers
+// ---------------------------------------------------------------------------
 
-    // Default sorting if no calculations exist yet
-    let categoriesSorted = ['Energy', 'Transport', 'Diet', 'Purchases'];
+/**
+ * Filter ALL_TIPS to a specific category and return up to `limit` results.
+ *
+ * @param {string} category - Tip category name (e.g. 'Transport').
+ * @param {number} limit    - Maximum number of tips to return.
+ * @returns {Array} Filtered tip objects.
+ */
+function getTipsForCategory(category, limit) {
+  return ALL_TIPS.filter(tip => tip.category === category).slice(0, limit);
+}
 
-    if (calc) {
-      const catScores = [
-        { name: 'Transport', val: calc.co2_transport },
-        { name: 'Energy', val: calc.co2_energy },
-        { name: 'Diet', val: calc.co2_diet },
-        { name: 'Purchases', val: calc.co2_purchases }
-      ];
-      // Sort descending by emission values
-      catScores.sort((a, b) => b.val - a.val);
-      categoriesSorted = catScores.map(c => c.name);
-    }
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
 
-    // 2. Fetch user's adopted tips status
-    db.all('SELECT tip_id, status FROM adopted_tips WHERE user_id = ?', [req.user.id], (err, adoptedRows) => {
-      if (err) {
-        return res.status(500).json({ error: 'Database query failed' });
-      }
+/**
+ * @route  GET /api/recommendations
+ * @desc   Return personalised reduction tips ranked by user's highest emission categories.
+ * @access Private
+ */
+router.get('/', auth, asyncHandler(async (req, res) => {
+  // 1. Get latest calculation to determine category rankings
+  const latestCalculation = await dbGet(
+    'SELECT * FROM calculations WHERE user_id = ? ORDER BY date DESC LIMIT 1',
+    [req.user.id]
+  );
 
-      const statusMap = {};
-      adoptedRows.forEach(row => {
-        statusMap[row.tip_id] = row.status;
-      });
+  // Sort emission categories highest-first; fall back to a sensible default order
+  let categoriesByEmission = ['Energy', 'Transport', 'Diet', 'Purchases'];
+  if (latestCalculation) {
+    categoriesByEmission = [
+      { name: 'Transport', value: latestCalculation.co2_transport },
+      { name: 'Energy',    value: latestCalculation.co2_energy    },
+      { name: 'Diet',      value: latestCalculation.co2_diet      },
+      { name: 'Purchases', value: latestCalculation.co2_purchases  }
+    ]
+      .sort((a, b) => b.value - a.value)
+      .map(entry => entry.name);
+  }
 
-      // 3. Filter and select tips:
-      // We will select:
-      // - 3 tips from the highest-impact category
-      // - 2 tips from the second-highest-impact category
-      // - 1 tip from each other category
-      // ensuring we provide a total of 7 personalized tips.
-      const selectedTips = [];
-      const primaryCat = categoriesSorted[0];
-      const secondaryCat = categoriesSorted[1];
-      const tertiaryCat = categoriesSorted[2];
-      const quaternaryCat = categoriesSorted[3];
+  // 2. Fetch adopted tip statuses for this user
+  const adoptedRows = await dbAll(
+    'SELECT tip_id, status FROM adopted_tips WHERE user_id = ?',
+    [req.user.id]
+  );
 
-      const getTipsForCat = (cat, limit) => {
-        return ALL_TIPS.filter(t => t.category === cat).slice(0, limit);
-      };
+  const adoptionStatusMap = {};
+  adoptedRows.forEach(row => { adoptionStatusMap[row.tip_id] = row.status; });
 
-      selectedTips.push(...getTipsForCat(primaryCat, 3));
-      selectedTips.push(...getTipsForCat(secondaryCat, 2));
-      selectedTips.push(...getTipsForCat(tertiaryCat, 1));
-      selectedTips.push(...getTipsForCat(quaternaryCat, 1));
+  // 3. Select tips: primary × 3, secondary × 2, tertiary × 1, quaternary × 1
+  const [primaryCategory, secondaryCategory, tertiaryCategory, quaternaryCategory]
+    = categoriesByEmission;
 
-      // Map with current user status
-      const formattedTips = selectedTips.map(tip => ({
-        ...tip,
-        status: statusMap[tip.id] || 'none' // 'none', 'in_progress', 'adopted'
-      }));
+  const selectedTips = [
+    ...getTipsForCategory(primaryCategory,   RECOMMENDATION_TIPS_COUNT.PRIMARY),
+    ...getTipsForCategory(secondaryCategory, RECOMMENDATION_TIPS_COUNT.SECONDARY),
+    ...getTipsForCategory(tertiaryCategory,  RECOMMENDATION_TIPS_COUNT.TERTIARY),
+    ...getTipsForCategory(quaternaryCategory,RECOMMENDATION_TIPS_COUNT.QUATERNARY)
+  ];
 
-      res.json(formattedTips);
-    });
-  });
-});
+  // 4. Attach current adoption status to each tip
+  const formattedTips = selectedTips.map(tip => ({
+    ...tip,
+    status: adoptionStatusMap[tip.id] || 'none'
+  }));
 
-// @route   POST api/recommendations/adopt
-// @desc    Adopt or mark a reduction tip in progress
-// @access  Private
-router.post('/adopt', auth, (req, res) => {
+  res.json(formattedTips);
+}));
+
+/**
+ * @route  POST /api/recommendations/adopt
+ * @desc   Mark a reduction tip as in_progress, adopted, or clear its status.
+ * @access Private
+ */
+router.post('/adopt', auth, asyncHandler(async (req, res) => {
   const { tip_id, status } = req.body;
+  const VALID_STATUSES = ['in_progress', 'adopted', 'none'];
 
-  if (!tip_id || !['in_progress', 'adopted', 'none'].includes(status)) {
-    return res.status(400).json({ error: 'Invalid tip_id or status value' });
+  if (!tip_id || !VALID_STATUSES.includes(status)) {
+    throw new AppError('Invalid tip_id or status value', 400);
   }
 
-  // Find tip to see details (e.g. savings)
   const tip = ALL_TIPS.find(t => t.id === tip_id);
-  if (!tip) {
-    return res.status(404).json({ error: 'Tip not found' });
+  if (!tip) throw new AppError('Tip not found', 404);
+
+  // Handle status clearing
+  if (status === 'none') {
+    await dbRun(
+      'DELETE FROM adopted_tips WHERE user_id = ? AND tip_id = ?',
+      [req.user.id, tip_id]
+    );
+    return res.json({ message: 'Tip status cleared', tip_id, status: 'none' });
   }
 
-  // Check if tip has already been marked as adopted
-  db.get('SELECT status FROM adopted_tips WHERE user_id = ? AND tip_id = ?', [req.user.id, tip_id], (err, existingRow) => {
-    if (err) {
-      return res.status(500).json({ error: 'Database check failed' });
-    }
+  // Check current adoption state before upserting
+  const existingRow = await dbGet(
+    'SELECT status FROM adopted_tips WHERE user_id = ? AND tip_id = ?',
+    [req.user.id, tip_id]
+  );
+  const wasAlreadyAdopted = existingRow?.status === 'adopted';
 
-    if (status === 'none') {
-      // Remove adoption status
-      db.run('DELETE FROM adopted_tips WHERE user_id = ? AND tip_id = ?', [req.user.id, tip_id], function (err) {
-        if (err) return res.status(500).json({ error: 'Database delete failed' });
-        return res.json({ message: 'Tip status cleared', tip_id, status: 'none' });
-      });
-      return;
-    }
+  // Upsert adoption record
+  await dbRun(
+    `INSERT INTO adopted_tips (user_id, tip_id, status) VALUES (?, ?, ?)
+     ON CONFLICT(user_id, tip_id) DO UPDATE SET status=excluded.status`,
+    [req.user.id, tip_id, status]
+  );
 
-    const alreadyAdopted = existingRow && existingRow.status === 'adopted';
-
-    // Update or Insert tip status
-    db.run(
-      `INSERT INTO adopted_tips (user_id, tip_id, status) VALUES (?, ?, ?)
-       ON CONFLICT(user_id, tip_id) DO UPDATE SET status=excluded.status`,
-      [req.user.id, tip_id, status],
-      function (err) {
-        if (err) {
-          return res.status(500).json({ error: 'Database save failed: ' + err.message });
-        }
-
-        // If status is changed to 'adopted' and it wasn't adopted before, award 100 points!
-        if (status === 'adopted' && !alreadyAdopted) {
-          db.run('UPDATE users SET points = points + 100 WHERE id = ?', [req.user.id], (err) => {
-            if (err) console.error('Failed to award adoption points:', err.message);
-            res.json({
-              message: 'Tip successfully adopted! +100 Points earned!',
-              tip_id,
-              status,
-              pointsEarned: 100
-            });
-          });
-        } else {
-          res.json({
-            message: 'Tip status updated to ' + status,
-            tip_id,
-            status,
-            pointsEarned: 0
-          });
-        }
-      }
+  // Award points only on first adoption
+  if (status === 'adopted' && !wasAlreadyAdopted) {
+    await dbRun(
+      'UPDATE users SET points = points + ? WHERE id = ?',
+      [POINTS_REWARDS.ADOPTION, req.user.id]
     );
+    return res.json({
+      message: `Tip successfully adopted! +${POINTS_REWARDS.ADOPTION} Points earned!`,
+      tip_id,
+      status,
+      pointsEarned: POINTS_REWARDS.ADOPTION
+    });
+  }
+
+  res.json({
+    message: `Tip status updated to ${status}`,
+    tip_id,
+    status,
+    pointsEarned: 0
   });
-});
+}));
 
 module.exports = router;

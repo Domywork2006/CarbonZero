@@ -123,6 +123,17 @@ function initializeDatabase() {
 
     // Seed articles
     seedArticles();
+
+    // Performance indexes — dramatically speed up common filtered queries.
+    // CREATE INDEX IF NOT EXISTS is idempotent (safe to run on every startup).
+    db.run(`CREATE INDEX IF NOT EXISTS idx_calculations_user_date
+            ON calculations(user_id, date)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_adopted_tips_user
+            ON adopted_tips(user_id, tip_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_badges_user
+            ON badges(user_id, badge_key)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_users_email
+            ON users(email)`);
   });
 }
 

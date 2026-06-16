@@ -1,60 +1,157 @@
+'use strict';
+
+/**
+ * @fileoverview Carbon footprint calculation routes for TerraSense.
+ * Handles submitting new calculations, fetching history, and generating summaries.
+ *
+ * Refactored: callback hell → async/await, magic numbers → constants,
+ * duplicated rounding → roundEmissions(), N+1 badge query → COUNT(*).
+ */
+
 const express = require('express');
 const router = express.Router();
-const db = require('../models/database');
 const auth = require('../middleware/auth');
+const { asyncHandler, AppError } = require('../middleware/errorHandler');
+const { dbGet, dbRun, dbAll } = require('../utils/db');
 const { calculateCarbonFootprint } = require('../utils/calculator');
+const { roundEmissions, round } = require('../utils/formatting');
+const { validateCalculationInput } = require('../utils/validators');
+const {
+  POINTS_REWARDS,
+  EMISSION_SCORE_DIVISOR,
+  PREDICTED_REDUCTION_RATE,
+  STREAK_MAX_GAP_DAYS,
+  NATIONAL_AVERAGES,
+  BADGE_KEYS,
+  GREEN_GUARDIAN_THRESHOLD,
+  SUSTAINABILITY_CHAMPION_THRESHOLD
+} = require('../utils/constants');
 
-// Helper to award badge if not already awarded
-function awardBadge(userId, badgeKey, callback) {
-  db.get('SELECT id FROM badges WHERE user_id = ? AND badge_key = ?', [userId, badgeKey], (err, row) => {
-    if (err || row) {
-      return callback(false); // Already awarded or error
-    }
-    db.run('INSERT INTO badges (user_id, badge_key) VALUES (?, ?)', [userId, badgeKey], function (err) {
-      if (err) {
-        return callback(false);
-      }
-      // Award points for earning a badge (500 points)
-      db.run('UPDATE users SET points = points + 500 WHERE id = ?', [userId]);
-      callback(true);
-    });
-  });
+// ---------------------------------------------------------------------------
+// Private Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Award a badge to a user if they do not already hold it.
+ * Automatically grants POINTS_REWARDS.BADGE points on first award.
+ *
+ * @param {number} userId   - The user's database ID.
+ * @param {string} badgeKey - One of the BADGE_KEYS enum values.
+ * @returns {Promise<boolean>} true if the badge was newly awarded, false if already held.
+ */
+async function awardBadgeAsync(userId, badgeKey) {
+  const existing = await dbGet(
+    'SELECT id FROM badges WHERE user_id = ? AND badge_key = ?',
+    [userId, badgeKey]
+  );
+  if (existing) return false; // Already awarded
+
+  await dbRun(
+    'INSERT INTO badges (user_id, badge_key) VALUES (?, ?)',
+    [userId, badgeKey]
+  );
+  // Fire-and-forget points update — non-critical
+  dbRun('UPDATE users SET points = points + ? WHERE id = ?', [POINTS_REWARDS.BADGE, userId]);
+  return true;
 }
 
-// @route   POST api/calculations
-// @desc    Submit a new monthly carbon footprint calculation
-// @access  Private
-router.post('/', auth, (req, res) => {
+/**
+ * Update a user's monthly streak based on the current calculation date.
+ *
+ * @param {number} userId          - The user's database ID.
+ * @param {string} calculationDate - ISO date string (YYYY-MM-DD).
+ * @returns {Promise<number>} The new streak value.
+ */
+async function updateStreakAsync(userId, calculationDate) {
+  const userRow = await dbGet(
+    'SELECT streak, last_calculated_date FROM users WHERE id = ?',
+    [userId]
+  );
+
+  const currentStreak = userRow?.streak ?? 0;
+  const lastDateStr = userRow?.last_calculated_date ?? null;
+  let nextStreak = 1;
+
+  if (lastDateStr) {
+    const lastDate = new Date(lastDateStr);
+    const currentDate = new Date(calculationDate);
+    const diffDays = Math.ceil(Math.abs(currentDate - lastDate) / (1000 * 60 * 60 * 24));
+
+    if (diffDays === 0) {
+      nextStreak = currentStreak || 1; // Same day — keep current
+    } else if (diffDays <= STREAK_MAX_GAP_DAYS) {
+      nextStreak = currentStreak + 1;  // Within the window — increment
+    }
+    // else diffDays > STREAK_MAX_GAP_DAYS — streak broken, reset to 1
+  }
+
+  await dbRun(
+    'UPDATE users SET points = points + ?, streak = ?, last_calculated_date = ? WHERE id = ?',
+    [POINTS_REWARDS.CALCULATION, nextStreak, calculationDate, userId]
+  );
+
+  return nextStreak;
+}
+
+/**
+ * Determine which reduction badges a user has earned based on their calculation history.
+ *
+ * @param {Array<{co2_total: number}>} calculations - All user calculations ordered by date ASC.
+ * @param {number} currentCO2 - The co2_total from the newest calculation.
+ * @returns {Promise<string[]>} Array of newly awarded badge keys.
+ */
+async function determineBadgesAsync(userId, calculations, currentCO2) {
+  const newlyAwardedBadges = [];
+
+  // first_step — awarded for any calculation submitted
+  const awardedFirstStep = await awardBadgeAsync(userId, BADGE_KEYS.FIRST_STEP);
+  if (awardedFirstStep) newlyAwardedBadges.push(BADGE_KEYS.FIRST_STEP);
+
+  if (calculations.length > 1) {
+    const baselineCO2 = calculations[0].co2_total;
+    const reductionPercent = baselineCO2 > 0
+      ? ((baselineCO2 - currentCO2) / baselineCO2) * 100
+      : 0;
+
+    if (reductionPercent >= GREEN_GUARDIAN_THRESHOLD) {
+      const awardedGG = await awardBadgeAsync(userId, BADGE_KEYS.GREEN_GUARDIAN);
+      if (awardedGG) newlyAwardedBadges.push(BADGE_KEYS.GREEN_GUARDIAN);
+    }
+
+    if (reductionPercent >= SUSTAINABILITY_CHAMPION_THRESHOLD) {
+      const awardedSC = await awardBadgeAsync(userId, BADGE_KEYS.SUSTAINABILITY_CHAMPION);
+      if (awardedSC) newlyAwardedBadges.push(BADGE_KEYS.SUSTAINABILITY_CHAMPION);
+    }
+  }
+
+  return newlyAwardedBadges;
+}
+
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
+
+/**
+ * @route  POST /api/calculations
+ * @desc   Submit a new monthly carbon footprint calculation.
+ * @access Private
+ */
+router.post('/', auth, asyncHandler(async (req, res) => {
   const {
-    car_miles = 0,
-    bus_miles = 0,
-    train_miles = 0,
-    flight_miles = 0,
-    bike_miles = 0,
-    electricity_kwh = 0,
-    gas_kwh = 0,
-    heating_kwh = 0,
-    veg_meals = 0,
-    meat_meals = 0,
-    vegan_meals = 0,
-    waste_kg = 0,
-    water_liters = 0,
-    clothing_items = 0,
-    electronics_items = 0,
-    shipping_packages = 0,
-    date // Optional, defaults to now
+    car_miles = 0, bus_miles = 0, train_miles = 0, flight_miles = 0, bike_miles = 0,
+    electricity_kwh = 0, gas_kwh = 0, heating_kwh = 0,
+    veg_meals = 0, meat_meals = 0, vegan_meals = 0,
+    waste_kg = 0, water_liters = 0,
+    clothing_items = 0, electronics_items = 0, shipping_packages = 0,
+    date
   } = req.body;
 
-  // 1. Calculate CO2 equivalent values in kg
-  const { 
-    co2_transport, 
-    co2_energy, 
-    co2_diet, 
-    co2_waste, 
-    co2_water, 
-    co2_purchases, 
-    co2_total 
-  } = calculateCarbonFootprint({
+  // 1. Validate inputs
+  const validationError = validateCalculationInput(req.body);
+  if (validationError) throw new AppError(validationError, 400);
+
+  // 2. Calculate CO2 equivalent values
+  const emissions = calculateCarbonFootprint({
     car_miles, bus_miles, train_miles, flight_miles, bike_miles,
     electricity_kwh, gas_kwh, heating_kwh,
     veg_meals, meat_meals, vegan_meals,
@@ -62,10 +159,15 @@ router.post('/', auth, (req, res) => {
     clothing_items, electronics_items, shipping_packages
   });
 
+  const {
+    co2_transport, co2_energy, co2_diet,
+    co2_waste, co2_water, co2_purchases, co2_total
+  } = emissions;
+
   const calculationDate = date || new Date().toISOString().split('T')[0];
 
-  // 2. Save calculation to database
-  db.run(
+  // 3. Persist calculation
+  const { lastID: calculationId } = await dbRun(
     `INSERT INTO calculations (
       user_id, date, car_miles, bus_miles, train_miles, flight_miles, bike_miles,
       electricity_kwh, gas_kwh, heating_kwh, veg_meals, meat_meals, vegan_meals,
@@ -73,229 +175,132 @@ router.post('/', auth, (req, res) => {
       co2_transport, co2_energy, co2_diet, co2_waste, co2_water, co2_purchases, co2_total
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      req.user.id, calculationDate, car_miles, bus_miles, train_miles, flight_miles, bike_miles,
-      electricity_kwh, gas_kwh, heating_kwh, veg_meals, meat_meals, vegan_meals,
+      req.user.id, calculationDate,
+      car_miles, bus_miles, train_miles, flight_miles, bike_miles,
+      electricity_kwh, gas_kwh, heating_kwh,
+      veg_meals, meat_meals, vegan_meals,
       waste_kg, water_liters, clothing_items, electronics_items, shipping_packages,
       co2_transport, co2_energy, co2_diet, co2_waste, co2_water, co2_purchases, co2_total
-    ],
-    function (err) {
-      if (err) {
-        return res.status(500).json({ error: 'Database save failed: ' + err.message });
-      }
-
-      const calculationId = this.lastID;
-
-      // 3. Update User Streak and Last Calculated Date
-      db.get('SELECT streak, last_calculated_date FROM users WHERE id = ?', [req.user.id], (err, userRow) => {
-        let currentStreak = userRow ? userRow.streak : 0;
-        let lastDateStr = userRow ? userRow.last_calculated_date : null;
-        let nextStreak = 1;
-
-        if (lastDateStr) {
-          const lastDate = new Date(lastDateStr);
-          const currentDate = new Date(calculationDate);
-          const diffTime = Math.abs(currentDate - lastDate);
-          const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-          if (diffDays <= 35 && diffDays > 0) {
-            nextStreak = currentStreak + 1;
-          } else if (diffDays === 0) {
-            nextStreak = currentStreak || 1; // Logged on same day, keep current
-          } else {
-            nextStreak = 1; // Streak broken
-          }
-        }
-
-        db.run(
-          'UPDATE users SET points = points + 50, streak = ?, last_calculated_date = ? WHERE id = ?',
-          [nextStreak, calculationDate, req.user.id],
-          (err) => {
-            if (err) console.error('Failed to update user points and streak:', err.message);
-          }
-        );
-      });
-
-      // 4. Badge checks
-      const newlyAwardedBadges = [];
-
-      db.all('SELECT co2_total, date FROM calculations WHERE user_id = ? ORDER BY date ASC', [req.user.id], (err, rows) => {
-        if (err || !rows || rows.length === 0) {
-          return res.status(201).json({
-            id: calculationId,
-            co2_transport,
-            co2_energy,
-            co2_diet,
-            co2_waste,
-            co2_water,
-            co2_purchases,
-            co2_total,
-            newlyAwardedBadges
-          });
-        }
-
-        awardBadge(req.user.id, 'first_step', (awarded) => {
-          if (awarded) newlyAwardedBadges.push('first_step');
-
-          if (rows.length > 1) {
-            const baseline = rows[0].co2_total;
-            const current = co2_total;
-            const reductionPercent = ((baseline - current) / baseline) * 100;
-
-            if (reductionPercent >= 50) {
-              awardBadge(req.user.id, 'green_guardian', (awardedGG) => {
-                if (awardedGG) newlyAwardedBadges.push('green_guardian');
-
-                if (reductionPercent >= 75) {
-                  awardBadge(req.user.id, 'sustainability_champion', (awardedSC) => {
-                    if (awardedSC) newlyAwardedBadges.push('sustainability_champion');
-                    respond();
-                  });
-                } else {
-                  respond();
-                }
-              });
-            } else {
-              respond();
-            }
-          } else {
-            respond();
-          }
-        });
-
-        function respond() {
-          res.status(201).json({
-            id: calculationId,
-            date: calculationDate,
-            co2_transport,
-            co2_energy,
-            co2_diet,
-            co2_waste,
-            co2_water,
-            co2_purchases,
-            co2_total,
-            newlyAwardedBadges
-          });
-        }
-      });
-    }
+    ]
   );
-});
 
-// @route   GET api/calculations/history
-// @desc    Get all calculations for a user
-// @access  Private
-router.get('/history', auth, (req, res) => {
-  db.all('SELECT * FROM calculations WHERE user_id = ? ORDER BY date DESC', [req.user.id], (err, rows) => {
-    if (err) {
-      return res.status(500).json({ error: 'Database query failed' });
-    }
-    
-    const formatted = rows.map(r => ({
-      ...r,
-      co2_transport: Math.round(r.co2_transport * 10) / 10,
-      co2_energy: Math.round(r.co2_energy * 10) / 10,
-      co2_diet: Math.round(r.co2_diet * 10) / 10,
-      co2_waste: Math.round(r.co2_waste * 10) / 10,
-      co2_water: Math.round(r.co2_water * 100) / 100,
-      co2_purchases: Math.round(r.co2_purchases * 10) / 10,
-      co2_total: Math.round(r.co2_total * 10) / 10
-    }));
+  // 4. Update streak (fire-and-forget — does not block response)
+  updateStreakAsync(req.user.id, calculationDate).catch(() => {});
 
-    res.json(formatted);
+  // 5. Badge checks — use COUNT(*) to avoid loading all rows just for existence check
+  const { count: calculationCount } = await dbGet(
+    'SELECT COUNT(*) as count FROM calculations WHERE user_id = ?',
+    [req.user.id]
+  );
+
+  let newlyAwardedBadges = [];
+  if (calculationCount > 0) {
+    const allCalculations = await dbAll(
+      'SELECT co2_total FROM calculations WHERE user_id = ? ORDER BY date ASC',
+      [req.user.id]
+    );
+    newlyAwardedBadges = await determineBadgesAsync(req.user.id, allCalculations, co2_total);
+  }
+
+  res.status(201).json({
+    id: calculationId,
+    date: calculationDate,
+    ...roundEmissions(emissions),
+    newlyAwardedBadges
   });
-});
+}));
 
-// @route   GET api/calculations/summary
-// @desc    Get emissions summary, trend, prediction, and national comparisons
-// @access  Private
-router.get('/summary', auth, (req, res) => {
-  db.all('SELECT * FROM calculations WHERE user_id = ? ORDER BY date ASC', [req.user.id], (err, rows) => {
-    if (err) {
-      return res.status(500).json({ error: 'Database error' });
-    }
+/**
+ * @route  GET /api/calculations/history
+ * @desc   Get all calculations for the authenticated user, newest first.
+ * @access Private
+ */
+router.get('/history', auth, asyncHandler(async (req, res) => {
+  const rows = await dbAll(
+    'SELECT * FROM calculations WHERE user_id = ? ORDER BY date DESC',
+    [req.user.id]
+  );
+  res.json(rows.map(roundEmissions));
+}));
 
-    if (rows.length === 0) {
-      return res.json({
-        hasData: false,
-        message: 'No calculation data available yet.'
-      });
-    }
+/**
+ * @route  GET /api/calculations/summary
+ * @desc   Get emissions summary, trend data, prediction, and national comparisons.
+ * @access Private
+ */
+router.get('/summary', auth, asyncHandler(async (req, res) => {
+  const rows = await dbAll(
+    'SELECT * FROM calculations WHERE user_id = ? ORDER BY date ASC',
+    [req.user.id]
+  );
 
-    // Get current calculation (latest by date)
-    const latest = rows[rows.length - 1];
-    
-    // Baseline is the earliest calculation
-    const baseline = rows[0];
+  if (rows.length === 0) {
+    return res.json({ hasData: false, message: 'No calculation data available yet.' });
+  }
 
-    // Calculate reduction vs baseline
-    let reductionPercent = 0;
-    if (baseline.co2_total > 0) {
-      reductionPercent = ((baseline.co2_total - latest.co2_total) / baseline.co2_total) * 100;
-    }
+  const latest = rows[rows.length - 1];
+  const baseline = rows[0];
 
-    // Score Dial (0-100 rating)
-    const score = Math.max(0, Math.min(100, Math.round(100 - (latest.co2_total / 25))));
+  const reductionPercent = baseline.co2_total > 0
+    ? ((baseline.co2_total - latest.co2_total) / baseline.co2_total) * 100
+    : 0;
 
-    // Category breakdown
-    const categories = {
-      transport: Math.round(latest.co2_transport * 10) / 10,
-      energy: Math.round(latest.co2_energy * 10) / 10,
-      diet: Math.round(latest.co2_diet * 10) / 10,
-      waste: Math.round((latest.co2_waste || 0) * 10) / 10,
-      water: Math.round((latest.co2_water || 0) * 100) / 100,
-      purchases: Math.round(latest.co2_purchases * 10) / 10
-    };
+  // 0-100 sustainability score
+  const score = Math.max(
+    0,
+    Math.min(100, Math.round(100 - (latest.co2_total / EMISSION_SCORE_DIVISOR)))
+  );
 
-    // 90-day trend entries
-    const trend = rows.slice(-6).map(r => ({
-      date: r.date,
-      total: Math.round(r.co2_total * 10) / 10,
-      transport: Math.round(r.co2_transport * 10) / 10,
-      energy: Math.round(r.co2_energy * 10) / 10,
-      diet: Math.round(r.co2_diet * 10) / 10,
-      waste: Math.round((r.co2_waste || 0) * 10) / 10,
-      water: Math.round((r.co2_water || 0) * 100) / 100,
-      purchases: Math.round(r.co2_purchases * 10) / 10
-    }));
+  // Category breakdown for the latest calculation
+  const categories = {
+    transport: round(latest.co2_transport, 1),
+    energy:    round(latest.co2_energy,    1),
+    diet:      round(latest.co2_diet,      1),
+    waste:     round(latest.co2_waste  ?? 0, 1),
+    water:     round(latest.co2_water  ?? 0, 2),
+    purchases: round(latest.co2_purchases, 1)
+  };
 
-    // Footprint prediction based on historical usage (Linear projection)
-    let predictedNextMonth = Math.round(latest.co2_total * 0.95 * 10) / 10; // Default: assuming 5% reduction goal
-    
-    if (rows.length >= 2) {
-      const secondLatest = rows[rows.length - 2];
-      const diff = latest.co2_total - secondLatest.co2_total;
-      predictedNextMonth = Math.max(0, Math.round((latest.co2_total + diff) * 10) / 10);
-    }
+  // Last 6 entries for the trend chart
+  const trend = rows.slice(-6).map(r => ({
+    date:      r.date,
+    total:     round(r.co2_total,       1),
+    transport: round(r.co2_transport,   1),
+    energy:    round(r.co2_energy,      1),
+    diet:      round(r.co2_diet,        1),
+    waste:     round(r.co2_waste  ?? 0, 1),
+    water:     round(r.co2_water  ?? 0, 2),
+    purchases: round(r.co2_purchases,   1)
+  }));
 
-    // National average comparison data (monthly kg CO2e)
-    const nationalAverages = {
-      US: 1333,
-      UK: 708,
-      India: 183,
-      global: 400
-    };
+  // Linear prediction for next month
+  let predictedNextMonth = round(latest.co2_total * PREDICTED_REDUCTION_RATE, 1);
+  if (rows.length >= 2) {
+    const secondLatest = rows[rows.length - 2];
+    const trend_diff = latest.co2_total - secondLatest.co2_total;
+    predictedNextMonth = Math.max(0, round(latest.co2_total + trend_diff, 1));
+  }
 
-    res.json({
-      hasData: true,
-      latest: {
-        date: latest.date,
-        total: Math.round(latest.co2_total * 10) / 10,
-        categories
-      },
-      baseline: {
-        date: baseline.date,
-        total: Math.round(baseline.co2_total * 10) / 10
-      },
-      reductionPercent: Math.round(reductionPercent * 10) / 10,
-      score,
-      trend,
-      prediction: {
-        predictedNextMonth,
-        status: predictedNextMonth < latest.co2_total ? 'decreasing' : 'increasing'
-      },
-      nationalAverages
-    });
+  res.json({
+    hasData: true,
+    latest: {
+      date:  latest.date,
+      total: round(latest.co2_total, 1),
+      categories
+    },
+    baseline: {
+      date:  baseline.date,
+      total: round(baseline.co2_total, 1)
+    },
+    reductionPercent: round(reductionPercent, 1),
+    score,
+    trend,
+    prediction: {
+      predictedNextMonth,
+      status: predictedNextMonth < latest.co2_total ? 'decreasing' : 'increasing'
+    },
+    nationalAverages: NATIONAL_AVERAGES
   });
-});
+}));
 
 module.exports = router;

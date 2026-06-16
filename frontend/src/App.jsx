@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import api from './services/api';
+import React, { useState, useCallback } from 'react';
+import { useAuth } from './hooks/useAuth';
+import Toast from './components/Toast';
 
 // Pages
 import Auth from './pages/Auth';
@@ -12,120 +13,100 @@ import Profile from './pages/Profile';
 
 // Styles & Icons
 import './App.css';
-import { 
-  Leaf, 
-  LayoutDashboard, 
-  Calculator as CalcIcon, 
-  Sparkles, 
-  Trophy, 
-  BookOpen, 
-  User as UserIcon, 
-  Sun, 
-  Moon,
-  AlertCircle,
-  CheckCircle,
-  X
+import {
+  Leaf,
+  LayoutDashboard,
+  Calculator as CalcIcon,
+  Sparkles,
+  Trophy,
+  BookOpen,
+  User as UserIcon,
+  Sun,
+  Moon
 } from 'lucide-react';
 
-export default function App() {
-  const [token, setToken] = useState(localStorage.getItem('token'));
-  const [user, setUser] = useState(null);
-  const [activeTab, setActiveTab] = useState('dashboard');
-  const [loading, setLoading] = useState(true);
-  const [refreshTrigger, setRefreshTrigger] = useState(0);
+// ---------------------------------------------------------------------------
+// Memoised page components — only re-render when their own props change
+// ---------------------------------------------------------------------------
+const MemoizedDashboard      = React.memo(Dashboard);
+const MemoizedCalculator     = React.memo(Calculator);
+const MemoizedRecommendations = React.memo(Recommendations);
+const MemoizedLeaderboard    = React.memo(Leaderboard);
+const MemoizedEducationalHub = React.memo(EducationalHub);
+const MemoizedProfile        = React.memo(Profile);
 
-  // Theme State
-  const [theme, setTheme] = useState(() => {
-    return localStorage.getItem('theme') || 'light';
-  });
-
-  // Toasts State
+// ---------------------------------------------------------------------------
+// Toast helper hook (keeps toast logic out of App body)
+// ---------------------------------------------------------------------------
+function useToasts() {
   const [toasts, setToasts] = useState([]);
 
-  // Apply Theme
-  useEffect(() => {
+  const showToast = useCallback((message, type = 'success') => {
+    const id = `${Date.now()}-${Math.random()}`;
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 3500);
+  }, []);
+
+  const removeToast = useCallback((id) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
+
+  return { toasts, showToast, removeToast };
+}
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+export default function App() {
+  const { user, loading, login, logout, updateUser, refreshUser } = useAuth();
+  const { toasts, showToast, removeToast } = useToasts();
+
+  const [activeTab, setActiveTab]         = useState('dashboard');
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [theme, setTheme]                 = useState(
+    () => localStorage.getItem('theme') || 'light'
+  );
+
+  // Apply theme to DOM
+  React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
   }, [theme]);
 
-  // Toast helper
-  const showToast = (message, type = 'success') => {
-    const id = Date.now() + Math.random().toString();
-    setToasts(prev => [...prev, { id, message, type }]);
-    
-    // Auto remove after 3.5 seconds
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
-    }, 3500);
-  };
+  // ---------------------------------------------------------------------------
+  // Stable callbacks (wrapped in useCallback to avoid child re-renders)
+  // ---------------------------------------------------------------------------
 
-  const removeToast = (id) => {
-    setToasts(prev => prev.filter(t => t.id !== id));
-  };
-
-  // Load user profile if token is present
-  useEffect(() => {
-    async function loadUser() {
-      if (!token) {
-        setLoading(false);
-        return;
-      }
-      try {
-        const userData = await api.getMe();
-        setUser(userData);
-      } catch (err) {
-        console.error('Failed to load user profile:', err);
-        api.logout();
-        setToken(null);
-        setUser(null);
-        showToast('Session expired. Please log in again.', 'error');
-      } finally {
-        setLoading(false);
-      }
-    }
-    loadUser();
-  }, [token]);
-
-  const handleAuthSuccess = (authenticatedUser, jwtToken) => {
-    setToken(jwtToken);
-    setUser(authenticatedUser);
+  const handleAuthSuccess = useCallback((authenticatedUser, jwtToken) => {
+    login(authenticatedUser, jwtToken);
     setActiveTab('dashboard');
-  };
+  }, [login]);
 
-  const handleProfileUpdate = (updatedUser) => {
-    setUser(prev => ({
-      ...prev,
-      ...updatedUser
-    }));
-  };
-
-  const handleLogout = () => {
-    api.logout();
-    setToken(null);
-    setUser(null);
+  const handleLogout = useCallback(() => {
+    logout();
     setActiveTab('dashboard');
     showToast('Signed out successfully.');
-  };
+  }, [logout, showToast]);
 
-  const handlePointsChange = async () => {
-    try {
-      const userData = await api.getMe();
-      setUser(userData);
-    } catch (err) {
-      console.error('Failed to refresh user points:', err);
-    }
-  };
+  const handlePointsChange = useCallback(async () => {
+    await refreshUser();
+  }, [refreshUser]);
 
-  const handleCalculationSuccess = (result) => {
+  const handleCalculationSuccess = useCallback(() => {
     setRefreshTrigger(prev => prev + 1);
-    handlePointsChange(); // Refresh points / badges in sidebar
-    setActiveTab('dashboard'); // Redirect to dashboard
-  };
+    refreshUser();
+    setActiveTab('dashboard');
+  }, [refreshUser]);
 
-  const toggleTheme = () => {
-    setTheme(prev => prev === 'light' ? 'dark' : 'light');
-  };
+  const toggleTheme = useCallback(() => {
+    setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
+  }, []);
 
+  // ---------------------------------------------------------------------------
+  // Loading state
+  // ---------------------------------------------------------------------------
   if (loading) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', backgroundColor: 'var(--bg-primary)' }}>
@@ -137,36 +118,21 @@ export default function App() {
     );
   }
 
-  // Not Authenticated Layout
+  // ---------------------------------------------------------------------------
+  // Unauthenticated layout
+  // ---------------------------------------------------------------------------
   if (!user) {
     return (
       <>
         <Auth onAuthSuccess={handleAuthSuccess} showToast={showToast} />
-        
-        {/* Toast Stack */}
-        <div className="toast-container">
-          {toasts.map(t => (
-            <div key={t.id} className="toast" style={{ borderLeft: `4px solid ${t.type === 'error' ? '#ef4444' : 'var(--accent-color)'}` }}>
-              {t.type === 'error' ? (
-                <AlertCircle size={18} style={{ color: '#ef4444' }} />
-              ) : (
-                <CheckCircle size={18} style={{ color: 'var(--accent-color)' }} />
-              )}
-              <span style={{ fontSize: '0.88rem', fontWeight: '500' }}>{t.message}</span>
-              <button 
-                onClick={() => removeToast(t.id)} 
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', marginLeft: '8px', padding: '2px' }}
-              >
-                <X size={14} />
-              </button>
-            </div>
-          ))}
-        </div>
+        <Toast toasts={toasts} onRemove={removeToast} />
       </>
     );
   }
 
-  // Authenticated Layout
+  // ---------------------------------------------------------------------------
+  // Authenticated layout
+  // ---------------------------------------------------------------------------
   return (
     <div className="app-container">
       {/* Sidebar Navigation */}
@@ -178,42 +144,21 @@ export default function App() {
 
         <nav>
           <ul className="nav-menu">
-            <li className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`}>
-              <button onClick={() => setActiveTab('dashboard')}>
-                <LayoutDashboard size={18} />
-                Dashboard
-              </button>
-            </li>
-            <li className={`nav-item ${activeTab === 'calculator' ? 'active' : ''}`}>
-              <button onClick={() => setActiveTab('calculator')}>
-                <CalcIcon size={18} />
-                Calculator
-              </button>
-            </li>
-            <li className={`nav-item ${activeTab === 'recommendations' ? 'active' : ''}`}>
-              <button onClick={() => setActiveTab('recommendations')}>
-                <Sparkles size={18} />
-                Recommendations
-              </button>
-            </li>
-            <li className={`nav-item ${activeTab === 'leaderboard' ? 'active' : ''}`}>
-              <button onClick={() => setActiveTab('leaderboard')}>
-                <Trophy size={18} />
-                Leaderboard
-              </button>
-            </li>
-            <li className={`nav-item ${activeTab === 'educational' ? 'active' : ''}`}>
-              <button onClick={() => setActiveTab('educational')}>
-                <BookOpen size={18} />
-                Educational Hub
-              </button>
-            </li>
-            <li className={`nav-item ${activeTab === 'profile' ? 'active' : ''}`}>
-              <button onClick={() => setActiveTab('profile')}>
-                <UserIcon size={18} />
-                Profile Settings
-              </button>
-            </li>
+            {[
+              { tab: 'dashboard',       icon: <LayoutDashboard size={18} />, label: 'Dashboard' },
+              { tab: 'calculator',      icon: <CalcIcon size={18} />,        label: 'Calculator' },
+              { tab: 'recommendations', icon: <Sparkles size={18} />,        label: 'Recommendations' },
+              { tab: 'leaderboard',     icon: <Trophy size={18} />,          label: 'Leaderboard' },
+              { tab: 'educational',     icon: <BookOpen size={18} />,        label: 'Educational Hub' },
+              { tab: 'profile',         icon: <UserIcon size={18} />,        label: 'Profile Settings' }
+            ].map(({ tab, icon, label }) => (
+              <li key={tab} className={`nav-item ${activeTab === tab ? 'active' : ''}`}>
+                <button onClick={() => setActiveTab(tab)}>
+                  {icon}
+                  {label}
+                </button>
+              </li>
+            ))}
           </ul>
         </nav>
 
@@ -229,7 +174,9 @@ export default function App() {
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: '500' }}>Dark Theme</span>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: '500' }}>
+              Dark Theme
+            </span>
             <button className="theme-toggle" onClick={toggleTheme}>
               {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
             </button>
@@ -239,45 +186,16 @@ export default function App() {
 
       {/* Main Content Pane */}
       <main className="main-wrapper">
-        {activeTab === 'dashboard' && (
-          <Dashboard user={user} onNavigate={setActiveTab} refreshTrigger={refreshTrigger} />
-        )}
-        {activeTab === 'calculator' && (
-          <Calculator onCalculationSuccess={handleCalculationSuccess} showToast={showToast} />
-        )}
-        {activeTab === 'recommendations' && (
-          <Recommendations onPointsChange={handlePointsChange} showToast={showToast} />
-        )}
-        {activeTab === 'leaderboard' && (
-          <Leaderboard user={user} onPointsChange={handlePointsChange} showToast={showToast} />
-        )}
-        {activeTab === 'educational' && (
-          <EducationalHub onPointsChange={handlePointsChange} showToast={showToast} />
-        )}
-        {activeTab === 'profile' && (
-          <Profile user={user} onProfileUpdate={handleProfileUpdate} onLogout={handleLogout} showToast={showToast} />
-        )}
+        {activeTab === 'dashboard'       && <MemoizedDashboard user={user} onNavigate={setActiveTab} refreshTrigger={refreshTrigger} />}
+        {activeTab === 'calculator'      && <MemoizedCalculator onCalculationSuccess={handleCalculationSuccess} showToast={showToast} />}
+        {activeTab === 'recommendations' && <MemoizedRecommendations onPointsChange={handlePointsChange} showToast={showToast} />}
+        {activeTab === 'leaderboard'     && <MemoizedLeaderboard user={user} onPointsChange={handlePointsChange} showToast={showToast} />}
+        {activeTab === 'educational'     && <MemoizedEducationalHub onPointsChange={handlePointsChange} showToast={showToast} />}
+        {activeTab === 'profile'         && <MemoizedProfile user={user} onProfileUpdate={updateUser} onLogout={handleLogout} showToast={showToast} />}
       </main>
 
-      {/* Toast Stack */}
-      <div className="toast-container">
-        {toasts.map(t => (
-          <div key={t.id} className="toast" style={{ borderLeft: `4px solid ${t.type === 'error' ? '#ef4444' : 'var(--accent-color)'}` }}>
-            {t.type === 'error' ? (
-              <AlertCircle size={18} style={{ color: '#ef4444' }} />
-            ) : (
-              <CheckCircle size={18} style={{ color: 'var(--accent-color)' }} />
-            )}
-            <span style={{ fontSize: '0.88rem', fontWeight: '500' }}>{t.message}</span>
-            <button 
-              onClick={() => removeToast(t.id)} 
-              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', marginLeft: '8px', padding: '2px' }}
-            >
-              <X size={14} />
-            </button>
-          </div>
-        ))}
-      </div>
+      {/* Single toast stack — no longer duplicated */}
+      <Toast toasts={toasts} onRemove={removeToast} />
     </div>
   );
 }
